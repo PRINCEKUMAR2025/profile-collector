@@ -1,4 +1,6 @@
 streamlit
 playwright
 pandas
-bs4
+openpyxl
+beautifulsoup4
+lxml
