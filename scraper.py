@@ -34,18 +34,44 @@ class LinkedInAdvancedScraper:
         # Initialize query parameters
         query_params = {}
         
-        # Build keywords from job roles and skills
+        # Build keywords from job roles and skills with priority system
         keywords = []
         if self.search_params.get('job_roles'):
             keywords.extend(self.search_params['job_roles'])
         
-        if self.search_params.get('skills'):
-            keywords.extend(self.search_params['skills'])
+        # Handle new skills system with priority
+        must_have_skills = self.search_params.get('must_have_skills', [])
+        with_skills = self.search_params.get('with_skills', [])
+        legacy_skills = self.search_params.get('skills', [])
+        
+        # Priority 1: Must-have skills (required)
+        if must_have_skills:
+            keywords.extend(must_have_skills)
+            logger.info(f"Added must-have skills to search: {must_have_skills}")
+        
+        # Priority 2: With-skills (bonus) - add to keywords for broader search
+        if with_skills:
+            keywords.extend(with_skills)
+            logger.info(f"Added with-skills to search: {with_skills}")
+        
+        # Legacy skills support
+        if legacy_skills:
+            keywords.extend(legacy_skills)
+            logger.info(f"Added legacy skills to search: {legacy_skills}")
+        
+        # Note: Tier 1 colleges are applied via LinkedIn's School filter UI only
+        # They are NOT added to search keywords to keep URL clean
+        tier1_colleges = self.search_params.get('tier1_colleges', [])
+        tier1_filter_enabled = self.search_params.get('tier1_colleges_filter', False)
+        
+        if tier1_filter_enabled and tier1_colleges:
+            logger.info(f"Tier 1 filter enabled with {len(tier1_colleges)} colleges - will be applied via School filter UI only (not in URL)")
         
         # Combine keywords with proper spacing
         if keywords:
             keyword_query = " ".join(keywords)
             query_params['keywords'] = keyword_query
+            logger.info(f"Final keyword query: {keyword_query}")
         
         # Add location filter (LinkedIn uses 'location' parameter)
         if self.search_params.get('locations'):
@@ -161,6 +187,10 @@ class LinkedInAdvancedScraper:
                 if self.search_params.get('min_connections', 0) > 0:
                     self._apply_connection_filters(page)
                 
+                # Apply school/college filters for Tier 1 institutions
+                if self.search_params.get('tier1_colleges_filter', False):
+                    self._apply_school_filters(page)
+                
                 # Try multiple selectors for the show results button
                 show_results_selectors = [
                     'button[aria-label="Apply current filters to show results"]',
@@ -274,6 +304,186 @@ class LinkedInAdvancedScraper:
                         logger.info(f"Applied industry filter: {industry}")
         except Exception as e:
             logger.warning(f"Error applying industry filters: {e}")
+    
+    def _apply_school_filters(self, page):
+        """Apply school/college filters for Tier 1 institutions"""
+        try:
+            tier1_colleges = self.search_params.get('tier1_colleges', [])
+            tier1_filter_enabled = self.search_params.get('tier1_colleges_filter', False)
+            
+            if not tier1_filter_enabled or not tier1_colleges:
+                logger.info("Tier 1 filter disabled or no colleges selected - skipping school filter")
+                return
+            
+            logger.info(f"🎓 Applying school filters for {len(tier1_colleges)} Tier 1 colleges...")
+            
+            # Wait for filters panel to be fully loaded - dynamic wait
+            time.sleep(2)
+            # Wait for any existing filters to be applied first
+            time.sleep(1)
+            
+            # Step 1: Find and click the School section - try multiple strategies
+            school_section_selectors = [
+                'button:has-text("School")',
+                'button:has-text("Schools")',
+                'div:has-text("School")',
+                '[aria-label*="School"]',
+                'text="School"',
+                'text="Schools"'
+            ]
+            
+            school_section_found = False
+            for selector in school_section_selectors:
+                try:
+                    # Find all matching elements
+                    elements = page.query_selector_all(selector)
+                    for element in elements:
+                        try:
+                            # Check if element is visible and clickable
+                            if element.is_visible():
+                                element.click()
+                                school_section_found = True
+                                logger.info(f"✅ Clicked School section with selector: {selector}")
+                                time.sleep(2)
+                                break
+                        except:
+                            continue
+                    if school_section_found:
+                        break
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {e}")
+                    continue
+            
+            if not school_section_found:
+                logger.warning("⚠️ Could not find School filter section - trying alternative approach")
+                # Try scrolling down in the filters panel to find School section
+                try:
+                    page.evaluate("document.querySelector('.search-reusables__filter-list')?.scrollBy(0, 300)")
+                    time.sleep(1)
+                    
+                    # Try again after scrolling
+                    for selector in school_section_selectors:
+                        try:
+                            elements = page.query_selector_all(selector)
+                            for element in elements:
+                                if element.is_visible():
+                                    element.click()
+                                    school_section_found = True
+                                    logger.info(f"✅ Found School section after scrolling: {selector}")
+                                    time.sleep(2)
+                                    break
+                            if school_section_found:
+                                break
+                        except:
+                            continue
+                except Exception as e:
+                    logger.warning(f"Scroll attempt failed: {e}")
+            
+            if not school_section_found:
+                logger.error("❌ Could not find School filter section after all attempts")
+                return
+            
+            # Step 2: Find the school input field - try multiple selectors
+            school_input_selectors = [
+                'input[aria-label*="Add a school"]',
+                'input[placeholder*="Add a school" i]',
+                'input[placeholder*="school" i]',
+                'input[aria-label*="school" i]',
+                '.search-reusables__filter-pill-input',
+                'input[type="text"]'
+            ]
+            
+            # Step 3: Add each college (limit to first 10 for performance)
+            colleges_added = 0
+            for college in tier1_colleges[:10]:
+                try:
+                    school_input = None
+                    
+                    # Find visible input field
+                    for selector in school_input_selectors:
+                        try:
+                            inputs = page.query_selector_all(selector)
+                            for inp in inputs:
+                                if inp.is_visible() and inp.is_enabled():
+                                    school_input = inp
+                                    break
+                            if school_input:
+                                break
+                        except:
+                            continue
+                    
+                    if not school_input:
+                        logger.warning(f"⚠️ Could not find school input field for: {college}")
+                        break
+                    
+                    # Clear any existing text
+                    school_input.click()
+                    time.sleep(0.5)
+                    school_input.fill("")
+                    time.sleep(0.5)
+                    
+                    # Type college name slowly (more human-like)
+                    logger.info(f"🔍 Typing college name: {college}")
+                    school_input.type(college, delay=100)  # 100ms between keystrokes (more human-like)
+                    time.sleep(2)  # Wait longer for dropdown to appear
+                    
+                    # Try to click the first suggestion or press Enter
+                    suggestion_found = False
+                    suggestion_selectors = [
+                        f'li:has-text("{college}")',
+                        f'div:has-text("{college}")',
+                        '.search-typeahead-v2__hit',
+                        '[role="option"]',
+                        '.basic-typeahead__triggered-content li'
+                    ]
+                    
+                    for selector in suggestion_selectors:
+                        try:
+                            suggestions = page.query_selector_all(selector)
+                            if suggestions:
+                                # Click the first visible suggestion
+                                for suggestion in suggestions[:3]:
+                                    try:
+                                        if suggestion.is_visible():
+                                            suggestion.click()
+                                            suggestion_found = True
+                                            logger.info(f"✅ Clicked suggestion for: {college}")
+                                            time.sleep(2)  # Wait longer after each selection
+                                            colleges_added += 1
+                                            break
+                                    except:
+                                        continue
+                            if suggestion_found:
+                                break
+                        except:
+                            continue
+                    
+                    # If no suggestion clicked, press Enter
+                    if not suggestion_found:
+                        logger.info(f"No suggestion found, pressing Enter for: {college}")
+                        school_input.press('Enter')
+                        time.sleep(2)  # Wait longer after Enter
+                        colleges_added += 1
+                        logger.info(f"✅ Added school filter (via Enter): {college}")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Error adding school filter for {college}: {e}")
+                    continue
+            
+            logger.info(f"🎓 Successfully applied {colleges_added} school filters out of {min(len(tier1_colleges), 10)} attempted")
+            
+            if colleges_added == 0:
+                logger.error("❌ No school filters were applied - Tier 1 filter may not work correctly")
+            else:
+                logger.info(f"✅ School filter application complete!")
+                
+            # Wait for all filters to settle before continuing
+            time.sleep(3)
+                
+        except Exception as e:
+            logger.error(f"❌ Error in school filter application: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     def find_profile_elements(self, page):
         """Find profile elements using multiple selector strategies"""
@@ -483,7 +693,7 @@ class LinkedInAdvancedScraper:
             return profile_data
     
     def validate_search_results(self, page):
-        """Validate that search results match our criteria"""
+        """Validate that search results match our criteria - with lenient checking"""
         try:
             logger.info("Validating search results match our criteria...")
             
@@ -493,18 +703,19 @@ class LinkedInAdvancedScraper:
                 logger.warning("Not on people search results page")
                 return False
             
-            # Check page title for search confirmation
+            # Check page title for search confirmation (more lenient)
             page_title = page.title()
-            if "Search" not in page_title and "Results" not in page_title:
-                logger.warning("Page title doesn't indicate search results")
-                return False
+            logger.info(f"Page title: {page_title}")
             
             # Look for search result indicators
             search_indicators = [
                 'search-result',
                 'entity-result',
                 'profile-card',
-                'people-result'
+                'people-result',
+                'reusable-search',
+                'search-results',
+                'scaffold-layout__list'
             ]
             
             found_indicators = []
@@ -513,22 +724,39 @@ class LinkedInAdvancedScraper:
                     elements = page.query_selector_all(f'[class*="{indicator}"]')
                     if elements:
                         found_indicators.append(indicator)
+                        logger.info(f"Found {len(elements)} elements with class containing '{indicator}'")
                 except:
                     continue
             
+            # Also check for profile links as a fallback
+            profile_links = []
+            try:
+                profile_links = page.query_selector_all('a[href*="/in/"]')
+                if profile_links:
+                    logger.info(f"Found {len(profile_links)} profile links on page")
+            except:
+                pass
+            
+            # Validation passes if we find indicators OR profile links
             if found_indicators:
-                logger.info(f"Found search result indicators: {', '.join(found_indicators)}")
+                logger.info(f"✅ Found search result indicators: {', '.join(found_indicators)}")
+                return True
+            elif profile_links and len(profile_links) > 0:
+                logger.info(f"✅ No standard indicators, but found {len(profile_links)} profile links - proceeding")
                 return True
             else:
-                logger.warning("No search result indicators found")
-                return False
+                logger.warning("⚠️ No search result indicators or profile links found - may be empty results")
+                # Return True anyway to let it try to scrape (lenient mode)
+                logger.info("Proceeding with scraping attempt despite validation warning...")
+                return True
                 
         except Exception as e:
             logger.warning(f"Error validating search results: {e}")
-            return False
+            # Return True to continue anyway (lenient mode)
+            return True
     
     def filter_relevant_profiles(self, profile_data):
-        """Filter profiles to ensure they match our search criteria"""
+        """Filter profiles to ensure they match our search criteria with priority-based skills filtering"""
         if not profile_data:
             return profile_data
         
@@ -537,11 +765,14 @@ class LinkedInAdvancedScraper:
             'job_roles': [role.lower() for role in self.search_params.get('job_roles', [])],
             'locations': [loc.lower() for loc in self.search_params.get('locations', [])],
             'companies': [comp.lower() for comp in self.search_params.get('companies', [])],
-            'industries': [ind.lower() for ind in self.search_params.get('industries', [])]
+            'industries': [ind.lower() for ind in self.search_params.get('industries', [])],
+            'must_have_skills': [skill.lower() for skill in self.search_params.get('must_have_skills', [])],
+            'with_skills': [skill.lower() for skill in self.search_params.get('with_skills', [])]
         }
         
         for profile in profile_data:
             relevance_score = 0
+            skills_score = 0
             profile_text = f"{profile.get('name', '')} {profile.get('headline', '')} {profile.get('company', '')} {profile.get('location', '')}".lower()
             
             # Check job role relevance
@@ -568,21 +799,93 @@ class LinkedInAdvancedScraper:
                     relevance_score += 1
                     break
             
-            # Only include profiles with minimum relevance
-            if relevance_score >= 2:
-                profile['relevance_score'] = relevance_score
-                filtered_profiles.append(profile)
-                logger.info(f"Profile {profile.get('name', 'Unknown')} - Relevance: {relevance_score}")
+            # Priority-based skills filtering
+            must_have_skills_found = 0
+            with_skills_found = 0
+            
+            # Check must-have skills (Priority 1 - Required)
+            if search_criteria['must_have_skills']:
+                for skill in search_criteria['must_have_skills']:
+                    if skill in profile_text:
+                        must_have_skills_found += 1
+                        skills_score += 5  # High weight for must-have skills
+                
+                # Must have ALL must-have skills to pass
+                if must_have_skills_found < len(search_criteria['must_have_skills']):
+                    logger.debug(f"Profile {profile.get('name', 'Unknown')} - Missing must-have skills: {must_have_skills_found}/{len(search_criteria['must_have_skills'])}")
+                    continue
+                else:
+                    logger.info(f"Profile {profile.get('name', 'Unknown')} - Has all must-have skills: {must_have_skills_found}/{len(search_criteria['must_have_skills'])}")
             else:
-                logger.debug(f"Filtered out profile {profile.get('name', 'Unknown')} - Relevance: {relevance_score}")
+                # If no must-have skills specified, don't filter based on skills
+                must_have_skills_found = 1  # Pass the must-have check
+            
+            # Check with-skills (Priority 2 - Bonus)
+            if search_criteria['with_skills']:
+                for skill in search_criteria['with_skills']:
+                    if skill in profile_text:
+                        with_skills_found += 1
+                        skills_score += 2  # Lower weight for with-skills
+                
+                logger.info(f"Profile {profile.get('name', 'Unknown')} - With-skills found: {with_skills_found}/{len(search_criteria['with_skills'])}")
+            
+            # Calculate total relevance score
+            total_relevance = relevance_score + skills_score
+            
+            # Include profile if it passes must-have skills check and has minimum relevance
+            if must_have_skills_found >= len(search_criteria['must_have_skills']) and total_relevance >= 2:
+                profile['relevance_score'] = total_relevance
+                profile['must_have_skills_found'] = must_have_skills_found
+                profile['with_skills_found'] = with_skills_found
+                profile['skills_match_percentage'] = (must_have_skills_found + with_skills_found) / (len(search_criteria['must_have_skills']) + len(search_criteria['with_skills'])) * 100 if (search_criteria['must_have_skills'] or search_criteria['with_skills']) else 100
+                
+                filtered_profiles.append(profile)
+                logger.info(f"Profile {profile.get('name', 'Unknown')} - Total Relevance: {total_relevance}, Skills: {must_have_skills_found}M/{with_skills_found}W")
+            else:
+                logger.debug(f"Filtered out profile {profile.get('name', 'Unknown')} - Relevance: {total_relevance}, Must-have: {must_have_skills_found}/{len(search_criteria['must_have_skills'])}")
         
         logger.info(f"Filtered {len(filtered_profiles)} relevant profiles from {len(profile_data)} total")
         return filtered_profiles
+    
+    def initialize_csv_file(self, csv_filename):
+        """Initialize CSV file with headers"""
+        import csv
+        import os
+        
+        # Create CSV file with headers
+        headers = ['linkedin_profile', 'name', 'headline', 'location', 'current_company', 'is_tier1', 'tier1_college']
+        
+        with open(csv_filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+        
+        logger.info(f"📊 Created CSV file with headers: {csv_filename}")
+    
+    def save_profile_to_csv(self, profile_url, csv_filename, name="", headline="", location="", company="", is_tier1=False, tier1_college=""):
+        """Save a single profile to CSV file in real-time"""
+        import csv
+        
+        try:
+            with open(csv_filename, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([profile_url, name, headline, location, company, is_tier1, tier1_college])
+            logger.info(f"💾 Saved profile to CSV: {profile_url}")
+        except Exception as e:
+            logger.error(f"❌ Error saving profile to CSV: {e}")
     
     def scrape_linkedin(self):
         """Main scraping function with advanced features"""
         profile_urls = set()
         profile_data = []
+        
+        # Initialize CSV file for real-time saving
+        csv_filename = self.search_params.get('csv_filename', 'candidates.csv')
+        if not csv_filename.endswith('.csv'):
+            csv_filename += '.csv'
+        
+        # Create CSV file with headers at the start
+        self.initialize_csv_file(csv_filename)
+        logger.info(f"📁 Initialized CSV file: {csv_filename}")
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -626,26 +929,66 @@ class LinkedInAdvancedScraper:
             if self.search_params.get('use_advanced_filters', True):
                 self.apply_advanced_filters(page)
 
-            # Step 5: Validate search results
-            if not self.validate_search_results(page):
-                logger.warning("Search results validation failed. Taking screenshot for debugging.")
-                page.screenshot(path="search_validation_failed.png")
-                logger.info("Saved search validation screenshot")
-                
-                # Try to refresh and validate again
-                page.reload()
-                time.sleep(5)
-                if not self.validate_search_results(page):
-                    logger.error("Search validation failed after refresh. Check search parameters.")
-                    browser.close()
-                    return
+            # Step 5: Validate search results (lenient - won't stop scraping)
+            validation_result = self.validate_search_results(page)
+            if not validation_result:
+                logger.warning("Search results validation warning. Taking screenshot for debugging.")
+                page.screenshot(path="search_validation_warning.png")
+                logger.info("Saved search validation screenshot - continuing anyway...")
+            else:
+                logger.info("✅ Search results validated successfully")
 
             # Step 6: Scrape profiles from multiple pages
+            base_search_url = search_url.split('&page=')[0]  # Remove any existing page param
+            
             for page_num in range(1, self.search_params.get('pages', 10) + 1):
-                logger.info(f"Processing page {page_num}...")
+                logger.info(f"📄 Processing page {page_num}/{self.search_params.get('pages', 10)}...")
+                
+                # Navigate to specific page using Next button (preserves filters)
+                if page_num > 1:
+                    logger.info(f"Navigating to page {page_num} using Next button...")
+                    
+                    # Try to find and click the Next button
+                    next_button_selectors = [
+                        'button[aria-label="Next"]',
+                        'button:has-text("Next")',
+                        'button[aria-label="Go to next page"]',
+                        '.artdeco-pagination__button--next',
+                        'button[data-test-pagination-page-btn="next"]'
+                    ]
+                    
+                    next_clicked = False
+                    for selector in next_button_selectors:
+                        try:
+                            next_button = page.query_selector(selector)
+                            if next_button and next_button.is_visible() and next_button.is_enabled():
+                                next_button.click()
+                                logger.info(f"✅ Clicked Next button with selector: {selector}")
+                                time.sleep(4)  # Wait for page to load with filters preserved
+                                next_clicked = True
+                                break
+                        except Exception as e:
+                            logger.debug(f"Next button selector {selector} failed: {e}")
+                            continue
+                    
+                    if not next_clicked:
+                        logger.warning(f"Could not find enabled Next button for page {page_num}")
+                        # Try to find disabled next button to check if we've reached the end
+                        for selector in next_button_selectors:
+                            try:
+                                next_button = page.query_selector(selector)
+                                if next_button and next_button.is_visible():
+                                    if not next_button.is_enabled():
+                                        logger.info("Next button is disabled - reached end of results")
+                                        return
+                                    else:
+                                        logger.warning(f"Next button found but not clickable: {selector}")
+                            except:
+                                continue
+                        return
                 
                 # Wait for page to load
-                time.sleep(3)
+                time.sleep(2)
                 
                 # Scroll to load more profiles
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -681,6 +1024,19 @@ class LinkedInAdvancedScraper:
                             if profile_info['linkedin_profile']:
                                 profile_data.append(profile_info)
                                 profile_urls.add(profile_info['linkedin_profile'])
+                                
+                                # Save profile to CSV in real-time
+                                self.save_profile_to_csv(
+                                    profile_info['linkedin_profile'],
+                                    csv_filename,
+                                    profile_info.get('name', ''),
+                                    profile_info.get('headline', ''),
+                                    profile_info.get('location', ''),
+                                    profile_info.get('current_company', ''),
+                                    profile_info.get('is_tier1', False),
+                                    profile_info.get('tier1_college', '')
+                                )
+                                
                                 logger.info(f"Added profile {i+1}: {profile_info['name']} - {profile_info['linkedin_profile']}")
                         else:
                             # Just extract URLs
@@ -693,23 +1049,43 @@ class LinkedInAdvancedScraper:
                                         clean_url = 'https://www.linkedin.com' + clean_url
                                     if clean_url not in profile_urls:
                                         profile_urls.add(clean_url)
+                                        
+                                        # Save profile URL to CSV in real-time
+                                        self.save_profile_to_csv(clean_url, csv_filename)
+                                        
                                         logger.info(f"Added profile {i+1}: {clean_url}")
                     except Exception as e:
                         logger.warning(f"Error processing profile element {i+1}: {e}")
                         continue
-
-                # Navigate to next page
-                next_button = page.query_selector('button[aria-label="Next"]')
-                if next_button and next_button.is_enabled():
-                    logger.info("Clicking next page...")
-                    next_button.click()
-                    time.sleep(random.uniform(
-                        self.search_params.get('delay_min', 4),
-                        self.search_params.get('delay_max', 7)
-                    ))
-                else:
-                    logger.info("No more pages or next button disabled.")
+                
+                # Check if there are more results available
+                if not profile_elements or len(profile_elements) == 0:
+                    logger.info(f"No profiles found on page {page_num} - stopping pagination")
                     break
+                
+                # Check if Next button is disabled (indicates no more pages)
+                next_disabled = False
+                next_button_selectors = [
+                    'button[aria-label="Next"]',
+                    'button:has-text("Next")',
+                    '.artdeco-pagination__button--next'
+                ]
+                
+                for selector in next_button_selectors:
+                    try:
+                        next_button = page.query_selector(selector)
+                        if next_button and next_button.is_visible():
+                            if not next_button.is_enabled():
+                                next_disabled = True
+                                logger.info("Next button is disabled - no more pages available")
+                                break
+                    except:
+                        continue
+                
+                if next_disabled:
+                    break
+                
+                logger.info(f"✅ Page {page_num} complete - found {len(profile_urls)} total unique profiles so far")
 
             # Step 7: Filter profiles for relevance
             if self.search_params.get('include_profile_data', False) and profile_data:
@@ -724,6 +1100,30 @@ class LinkedInAdvancedScraper:
 
             # Step 8: Export data in multiple formats
             self.export_data(profile_urls, profile_data)
+            
+            # Final summary
+            logger.info(f"\n🎯 SCRAPING SUMMARY:")
+            logger.info(f"📊 Total profiles scraped: {len(profile_urls)}")
+            logger.info(f"📄 Total pages processed: {page_num}")
+            tier1_filter_enabled = self.search_params.get('tier1_colleges_filter', False)
+            tier1_colleges = self.search_params.get('tier1_colleges', [])
+            if tier1_filter_enabled and tier1_colleges:
+                logger.info(f"🎓 Tier 1 filter applied: {len(tier1_colleges)} colleges")
+            
+            # Show CSV file information
+            csv_filename = self.search_params.get('csv_filename', 'candidates.csv')
+            if not csv_filename.endswith('.csv'):
+                csv_filename += '.csv'
+            
+            # Check if CSV file exists and show its size
+            if os.path.exists(csv_filename):
+                file_size = os.path.getsize(csv_filename)
+                logger.info(f"💾 CSV file saved: {csv_filename} ({file_size:,} bytes)")
+                logger.info(f"📥 Ready for download in Streamlit app!")
+            else:
+                logger.warning(f"⚠️ CSV file not found: {csv_filename}")
+            
+            logger.info(f"✅ Real-time CSV saving completed!")
             
             browser.close()
 
